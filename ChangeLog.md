@@ -35,13 +35,36 @@ Change categories:
   - Add an analytic Gaussian-prior contribution to
     `estimate_evidence_lower_bound` when all relevant eigenvalues are
     available.
+  - Single precision inference now works end to end. Feeding `float32`
+    excitations to a `CorrelatedFieldMaker` model yields a `float32` forward
+    pass, Jacobian, adjoint Jacobian and gradient, and `optimize_kl` keeps the
+    position in `float32` throughout. Previously the correlated field model
+    silently promoted everything back to `float64`, which cost roughly a factor
+    of two in both memory and runtime. There is no new API: the precision
+    simply follows the precision of the input.
 - Bug fixes
   - `StatCalculator` computes the variance of complex samples as
     `conj(x-mean)*(x-mean)` now. Before, the conjugation was missing, such that
     the variance of complex samples could be complex or even negative.
+  - `CorrelatedFieldMaker` no longer upcasts single precision input to double
+    precision. Constants held by `Adder`, `DiagonalOperator` and
+    `VdotOperator` are now adapted to the precision of the field they are
+    combined with, while a pristine copy at construction precision is retained
+    so that switching precision back and forth loses no accuracy.
+  - `ScalingOperator` no longer promotes single precision fields in adjoint,
+    inverse and adjoint-inverse mode. `np.conj`/`np.sqrt` turned the weakly
+    typed Python float factor into a `np.float64`, which under NEP 50 promotes.
+  - `Linearization.gradient` seeds the reverse pass at the precision of the
+    variable rather than at `float64`. Energy *values* remain `float64` on
+    purpose, since dot products are deliberately accumulated in double
+    precision.
 - Changes
   - Reject zero requested eigenvalues when relevant metric degrees of freedom
     are present instead of failing later while processing an empty eigensystem.
+  - Applying an operator to a `MultiField` whose entries mix single and double
+    precision now emits a `UserWarning`. Mixing real and complex entries at one
+    and the same precision is unaffected.
+  - `Linearization` gained a `dtype` property, mirroring `device_id`.
 - Breaking changes
   - Change saved ELBO eigensystem filenames from
     `{prefix}_eigenvalues.npy` and `{prefix}_eigenvectors.npy` to

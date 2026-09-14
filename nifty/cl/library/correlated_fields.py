@@ -42,7 +42,7 @@ from ..operators.operator import Operator
 from ..operators.simple_linear_operators import Variable, VdotOperator
 from ..probing import StatCalculator
 from ..sugar import full, makeDomain, makeField, makeOp
-from ..utilities import myassert
+from ..utilities import match_precision, myassert, precision_is_single
 
 
 def _log_k_lengths(pspace):
@@ -97,14 +97,23 @@ class _SlopeRemover(EndomorphicOperator):
         axis = self._domain.axes[space][0]
         self._last = (slice(None),)*axis + (-1,) + (None,)
         extender = (None,)*(axis) + (slice(None),) + (None,)*(self._domain.axes[-1][-1]-axis)
-        self._sc = AnyArray(sc[extender])
+        self._sc = self._sc_master = AnyArray(sc[extender])
+        self._sc_single = None
         self._capability = self.TIMES | self.ADJOINT_TIMES
 
     def _device_preparation(self, x, mode):
         self._sc = self._sc.at(x.device_id)
 
+    def _precision_preparation(self, x):
+        single = precision_is_single(x.dtype)
+        if single is self._sc_single:
+            return
+        self._sc_single = single
+        self._sc = match_precision(self._sc_master, x.dtype)
+
     def apply(self, x, mode):
         self._check_input(x, mode)
+        self._precision_preparation(x)
         self._device_preparation(x, mode)
         if mode == self.TIMES:
             x = x.val
@@ -124,14 +133,23 @@ class _TwoLogIntegrations(LinearOperator):
         dom[space] = UnstructuredDomain((2, self.target[space].shape[0]-2))
         self._domain = makeDomain(dom)
         self._space = space
-        self._log_vol = _log_vol(self._target[space])
+        self._log_vol = self._log_vol_master = _log_vol(self._target[space])
+        self._log_vol_single = None
         self._capability = self.TIMES | self.ADJOINT_TIMES
 
     def _device_preparation(self, x, mode):
         self._log_vol = self._log_vol.at(x.device_id)
 
+    def _precision_preparation(self, x):
+        single = precision_is_single(x.dtype)
+        if single is self._log_vol_single:
+            return
+        self._log_vol_single = single
+        self._log_vol = match_precision(self._log_vol_master, x.dtype)
+
     def apply(self, x, mode):
         self._check_input(x, mode)
+        self._precision_preparation(x)
         self._device_preparation(x, mode)
 
         # Maybe make class properties
@@ -239,7 +257,7 @@ class _AmplitudeMatern(Operator):
         cutoff = VdotOperator(k_squared).adjoint @ cutoff.power(-2.)
         spectral_idx = expander.scale(0.25) @ loglogslope
 
-        ker = 1 + cutoff
+        ker = 1. + cutoff
         ker = spectral_idx * ker.log() + scale
         op = ker.exp()
 
@@ -323,7 +341,7 @@ class _Amplitude(Operator):
         shift = AnyArray(np.ones(shp))
         shift[0] = _log_vol(target[space])**2 / 12.
         shift = DiagonalOperator(makeField(dom[space], shift), dom, space)
-        shift = shift(full(shift.domain, 1))
+        shift = shift(full(shift.domain, 1.))
 
         vslope = DiagonalOperator(
             makeField(target[space], _relative_log_k_lengths(target[space])),
@@ -339,7 +357,7 @@ class _Amplitude(Operator):
         # details.
         vol1[1:] = vol0[0] = totvol
         vol0 = DiagonalOperator(makeField(target[space], vol0), target, space)
-        vol0 = vol0(full(vol0.domain, 1))
+        vol0 = vol0(full(vol0.domain, 1.))
         vol1 = DiagonalOperator(makeField(target[space], vol1), target, space)
         # End prepare constant fields
 
@@ -683,6 +701,14 @@ class CorrelatedFieldMaker:
         if self._offset_mean is not None and self._azm is not None:
             logger.warning("Overwriting the previous mean offset and zero-mode")
 
+        # An integer offset (e.g. the common `offset_mean=0`) would promote a
+        # single precision field back to double precision when added in
+        # `finalize`. A 0-d value is turned into a Python float, which is weakly
+        # typed under NEP 50 and therefore never promotes at all.
+        if offset_mean is not None:
+            arr = np.asarray(offset_mean)
+            if np.issubdtype(arr.dtype, np.integer):
+                offset_mean = float(arr) if arr.ndim == 0 else arr.astype(np.float64)
         self._offset_mean = offset_mean
         if offset_std is None:
             self._azm = 0.
@@ -844,7 +870,7 @@ class CorrelatedFieldMaker:
             zm_mask[1:] = zm_unmask[0] = 1.
             zm_mask = DiagonalOperator(makeField(a_pp, zm_mask), a_target, a_space)
             zm_unmask = DiagonalOperator(makeField(a_pp, zm_unmask), a_target, a_space)
-            zm_unmask = zm_unmask(full(zm_unmask.domain, 1))
+            zm_unmask = zm_unmask(full(zm_unmask.domain, 1.))
 
             assert a_target[a_space] == a_pp
             if np.isscalar(self.azm) and self._total_N == 0:
@@ -964,8 +990,8 @@ class CorrelatedFieldMaker:
         q = 1.
         for a in self._a:
             fl = a.fluctuation_amplitude/self.azm
-            q = q*(1 + fl**2)
-        return (q - 1).sqrt()*self.azm
+            q = q*(1. + fl**2)
+        return (q - 1.).sqrt()*self.azm
 
     def slice_fluctuation(self, space):
         """Returns operator which acts on prior or posterior samples"""
@@ -981,7 +1007,7 @@ class CorrelatedFieldMaker:
             if j == space:
                 q = q*fl**2
             else:
-                q = q*(1 + fl**2)
+                q = q*(1. + fl**2)
         return q.sqrt()*self.azm
 
     def average_fluctuation(self, space):

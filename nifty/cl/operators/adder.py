@@ -20,6 +20,7 @@ import numpy as np
 from ..field import Field
 from ..multi_field import MultiField
 from ..sugar import makeField
+from ..utilities import match_precision, precision_is_single
 from .operator import Operator
 
 
@@ -40,12 +41,24 @@ class Adder(Operator):
             raise TypeError
         self._domain = self._target = self._a.domain
         self._neg = bool(neg)
+        # Pristine copy at construction precision, so that adapting to single
+        # precision and back to double does not lose accuracy.
+        self._a_master = self._a
+        self._a_single = None
 
     def _device_preparation(self, x):
         self._a = self._a.at(x.device_id)
 
+    def _precision_preparation(self, x):
+        single = precision_is_single(x.dtype)
+        if single is self._a_single:
+            return
+        self._a_single = single
+        self._a = match_precision(self._a_master, x.dtype)
+
     def apply(self, x):
         self._check_input(x)
+        self._precision_preparation(x)
         self._device_preparation(x)
         if self._neg:
             return x - self._a

@@ -85,7 +85,10 @@ class ScalingOperator(EndomorphicOperator):
         MODES_WITH_ADJOINT = self.ADJOINT_TIMES | self.ADJOINT_INVERSE_TIMES
         MODES_WITH_INVERSE = self.INVERSE_TIMES | self.ADJOINT_INVERSE_TIMES
         if (mode & MODES_WITH_ADJOINT) != 0:
-            fct = np.conj(fct)
+            # `.conjugate()` rather than `np.conj`: the latter turns a Python
+            # float into a `np.float64`, which under NEP 50 would promote a
+            # single precision field to double precision.
+            fct = fct.conjugate()
         if (mode & MODES_WITH_INVERSE) != 0:
             fct = 1./fct
         return x*fct
@@ -93,7 +96,7 @@ class ScalingOperator(EndomorphicOperator):
     def _flip_modes(self, trafo):
         fct = self._factor
         if trafo & self.ADJOINT_BIT:
-            fct = np.conj(fct)
+            fct = fct.conjugate()
         if trafo & self.INVERSE_BIT:
             fct = 1./fct
         return ScalingOperator(self._domain, fct, self._dtype)
@@ -103,7 +106,9 @@ class ScalingOperator(EndomorphicOperator):
         if (fct.imag != 0. or fct.real < 0. or
                 (fct.real == 0. and from_inverse)):
             raise ValueError("operator not positive definite")
-        return 1./np.sqrt(fct) if from_inverse else np.sqrt(fct)
+        # `**0.5` rather than `np.sqrt` for the same weak-typing reason as in
+        # `apply`; `fct` is guaranteed non-negative real by the check above.
+        return 1./fct**0.5 if from_inverse else fct**0.5
 
     def draw_sample(self, from_inverse=False, device_id=-1):
         from ..sugar import from_random

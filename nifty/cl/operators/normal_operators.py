@@ -44,7 +44,11 @@ def NormalTransform(mean, sigma, key, N_copies=0):
     """
     if N_copies == 0:
         domain = DomainTuple.scalar_domain()
-        mean, sigma = np.asarray(mean, dtype=float), np.asarray(sigma, dtype=float)
+        # Plain Python floats rather than NumPy scalars: under NEP 50 a
+        # `np.float64` scalar would promote a single precision field back to
+        # double precision, whereas a Python float is weakly typed.
+        mean, sigma = (float(np.asarray(pp, dtype=float).reshape(()))
+                       for pp in (mean, sigma))
     else:
         domain = UnstructuredDomain(N_copies)
         mean, sigma = (makeField(domain, value_reshaper(param, N_copies)) for param in (mean, sigma))

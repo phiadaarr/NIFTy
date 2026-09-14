@@ -131,6 +131,10 @@ class DiagonalOperator(EndomorphicOperator):
         self._capability = self._all_ops
         if not self._complex:
             self._diagmin_cache = None
+        # Pristine copy at construction precision, so that adapting to single
+        # precision and back to double does not lose accuracy.
+        self._ldiag_master = self._ldiag
+        self._ldiag_single = None
 
     @property
     def _diagmin(self):
@@ -154,14 +158,18 @@ class DiagonalOperator(EndomorphicOperator):
         return res
 
     def _get_actual_diag(self):
+        # Operator algebra always uses the pristine diagonal: combining
+        # operators must not inherit the precision of whichever field the
+        # operator happened to be applied to last.
+        ldiag = self._ldiag_master
         if self._trafo == 0:
-            return self._ldiag
+            return ldiag
         if self._trafo == 1:
-            return np.conj(self._ldiag) if self._complex else self._ldiag
+            return np.conj(ldiag) if self._complex else ldiag
         if self._trafo == 2:
-            return 1./self._ldiag
+            return 1./ldiag
         if self._trafo == 3:
-            return np.conj(1./self._ldiag) if self._complex else 1./self._ldiag
+            return np.conj(1./ldiag) if self._complex else 1./ldiag
 
     def _scale(self, fct):
         if not np.isscalar(fct):
@@ -191,11 +199,22 @@ class DiagonalOperator(EndomorphicOperator):
     def _device_preparation(self, x, mode):
         self._ldiag = self._ldiag.at(x.device_id)
 
+    def _precision_preparation(self, x):
+        single = utilities.precision_is_single(x.dtype)
+        if single is self._ldiag_single:
+            return
+        self._ldiag_single = single
+        ldiag = utilities.match_precision(self._ldiag_master, x.dtype)
+        if ldiag is not self._ldiag_master:
+            ldiag.lock()
+        self._ldiag = ldiag
+
     def apply(self, x, mode):
         self._check_input(x, mode)
         # To save both time and memory, we remap the `mode` (via `self._trafo`)
         # and do not compute and store a new `self._ldiag`s for adjoint, inverse
         # or adjoint-inverse DiagonalOperators.
+        self._precision_preparation(x)
         self._device_preparation(x, mode)
         trafo = self._ilog[mode] ^ self._trafo
 

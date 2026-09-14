@@ -313,3 +313,109 @@ def test_complicated_vs_simple(seed, domain, without):
         assert op0.domain is op1.domain
         ift.extra.assert_allclose(op0.force(inp), op1.force(inp))
         ift.extra.assert_allclose(op0.force(inp2), op1.force(inp2))
+
+
+def _single_precision(pos):
+    return ift.MultiField.from_dict(
+        {kk: ift.Field(vv.domain, vv.val.astype(np.float32))
+         for kk, vv in pos.items()})
+
+
+@pmp("total_N", [0, 3])
+@pmp("asperity", [None, (0.2, 0.1)])
+@pmp("flexibility", [None, (1.0, 0.5)])
+@pmp("matern", [True, False])
+def test_single_precision(total_N, asperity, flexibility, matern):
+    """A correlated field fed single precision excitations must stay in single
+    precision, in the forward pass as well as in the Jacobian and its adjoint.
+    """
+    if flexibility is None and asperity is not None:
+        pytest.skip("flexibility may not be disabled on its own")
+    dofdex = tuple(range(total_N)) if total_N > 0 else ()
+    dom = ift.RGSpace((8, 8))
+
+    cfm = ift.CorrelatedFieldMaker("s_", total_N=total_N)
+    if matern:
+        if total_N > 0:
+            pytest.skip("matern kernels do not support total_N")
+        cfm.add_fluctuations_matern(dom, scale=(1.0, 0.5), cutoff=(1.0, 0.5),
+                                    loglogslope=(-4.0, 0.5))
+    else:
+        cfm.add_fluctuations(dom, fluctuations=(2.0, 1.0),
+                             loglogavgslope=(-2.0, 0.5),
+                             flexibility=flexibility, asperity=asperity,
+                             dofdex=dofdex)
+    cfm.set_amplitude_total_offset(offset_mean=0, offset_std=(0.5, 0.5),
+                                   dofdex=dofdex if total_N > 0 else None)
+    op = cfm.finalize()
+
+    pos64 = ift.from_random(op.domain)
+    pos32 = _single_precision(pos64)
+
+    res64, res32 = op(pos64), op(pos32)
+    assert res64.dtype == np.float64
+    assert res32.dtype == np.float32
+
+    lin = op(ift.Linearization.make_var(pos32))
+    assert lin.val.dtype == np.float32
+    tangent = lin.jac(pos32)
+    assert tangent.dtype == np.float32
+    adjoint = lin.jac.adjoint(ift.Field(op.target, res32.val.astype(np.float32)))
+    for kk, vv in adjoint.items():
+        assert vv.dtype == np.float32, f"{kk} is {vv.dtype}"
+
+    # Single precision must agree with double precision to single precision
+    # accuracy, i.e. the cast may not change what is being computed.
+    a, b = res64.asnumpy(), res32.asnumpy()
+    assert_allclose(b, a, rtol=1e-5, atol=1e-5 * np.max(np.abs(a)))
+
+
+def test_precision_does_not_leak_between_applications():
+    """Adapting an operator to single precision must not degrade it for
+    subsequent double precision applications."""
+    dom = ift.RGSpace((8, 8))
+    cfm = ift.CorrelatedFieldMaker("s_")
+    cfm.add_fluctuations(dom, fluctuations=(2.0, 1.0), loglogavgslope=(-2.0, 0.5),
+                         flexibility=(1.0, 0.5), asperity=(0.2, 0.1))
+    cfm.set_amplitude_total_offset(offset_mean=0, offset_std=(0.5, 0.5))
+    op = cfm.finalize()
+
+    pos = ift.from_random(op.domain)
+    before = op(pos).asnumpy().copy()
+    op(_single_precision(pos))
+    after = op(pos).asnumpy()
+    np.testing.assert_array_equal(before, after)
+
+
+def test_warn_on_mixed_precision():
+    """Inconsistent input precisions must be reported rather than silently
+    promoted."""
+    dom = ift.RGSpace((8, 8))
+    cfm = ift.CorrelatedFieldMaker("s_")
+    cfm.add_fluctuations(dom, fluctuations=(2.0, 1.0), loglogavgslope=(-2.0, 0.5),
+                         flexibility=None, asperity=None)
+    cfm.set_amplitude_total_offset(offset_mean=0, offset_std=(0.5, 0.5))
+    op = cfm.finalize()
+
+    pos32 = _single_precision(ift.from_random(op.domain))
+    dct = dict(pos32.items())
+    key = sorted(dct)[0]
+    dct[key] = ift.Field(dct[key].domain, dct[key].val.astype(np.float64))
+    mixed = ift.MultiField.from_dict(dct)
+
+    with pytest.warns(UserWarning, match="mixes single and double precision"):
+        op(mixed)
+
+    # Uniform precision must not warn, and neither must real/complex mixtures
+    # at one and the same precision.
+    import warnings
+    for pos in [pos32, ift.from_random(op.domain)]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            op(pos)
+
+    dct = dict(pos32.items())
+    dct[key] = ift.Field(dct[key].domain, dct[key].val.astype(np.complex64))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ift.utilities.warn_on_mixed_precision(ift.MultiField.from_dict(dct))

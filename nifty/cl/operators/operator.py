@@ -26,7 +26,8 @@ from .. import pointwise
 from ..domain_tuple import DomainTuple
 from ..logger import logger
 from ..multi_domain import MultiDomain
-from ..utilities import NiftyMeta, check_object_identity, indent, myassert
+from ..utilities import (NiftyMeta, check_object_identity, indent, myassert,
+                         warn_on_mixed_precision)
 
 
 class Operator(metaclass=NiftyMeta):
@@ -337,6 +338,9 @@ class Operator(metaclass=NiftyMeta):
                 raise ValueError
             if x.jac._factor != 1:
                 raise ValueError
+        # `x` is a Linearization here iff it carries a Jacobian; in that case
+        # the MultiField (if any) is one level down, in `x.val`.
+        warn_on_mixed_precision(x.val if x.jac is not None else x)
         check_object_identity(self._domain, x.domain)
 
     def __call__(self, x):

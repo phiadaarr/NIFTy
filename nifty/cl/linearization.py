@@ -20,7 +20,7 @@ import numpy as np
 from .multi_domain import MultiDomain
 from .operators.operator import Operator
 from .sugar import makeOp
-from .utilities import check_object_identity
+from .utilities import check_object_identity, precision_is_single
 
 
 class Linearization(Operator):
@@ -40,12 +40,19 @@ class Linearization(Operator):
         If True, the metric will be computed for other Linearizations derived
         from this one. Default: False.
     """
-    def __init__(self, val, jac, metric=None, want_metric=False):
+    def __init__(self, val, jac, metric=None, want_metric=False,
+                 var_single=None):
         self._val = val
         self._jac = jac
         check_object_identity(self._val.domain, self._jac.target)
         self._want_metric = want_metric
         self._metric = metric
+        # Precision of the variable this Linearization differentiates with
+        # respect to (True/False/None for single/double/unknown). It is needed
+        # to seed the reverse pass in `gradient` at the right precision; the
+        # value's own dtype cannot be used for that, since a scalar energy is
+        # deliberately accumulated in double precision.
+        self._var_single = var_single
 
     def new(self, val, jac, metric=None):
         """Create a new Linearization, taking the `want_metric` property from
@@ -60,10 +67,15 @@ class Linearization(Operator):
         metric : LinearOperator or None
             The metric. Default: None.
         """
-        return Linearization(val, jac, metric, self._want_metric)
+        return Linearization(val, jac, metric, self._want_metric,
+                             self._var_single)
 
     def trivial_jac(self):
-        return self.make_var(self._val, self._want_metric)
+        from .operators.scaling_operator import ScalingOperator
+        return Linearization(self._val,
+                             ScalingOperator(self._val.domain, 1.),
+                             want_metric=self._want_metric,
+                             var_single=self._var_single)
 
     def prepend_jac(self, jac):
         if jac.isIdentity():
@@ -107,7 +119,12 @@ class Linearization(Operator):
         Only available if target is a scalar
         """
         from .field import Field
-        return self._jac.adjoint_times(Field.scalar(1.))
+        # The seed of the reverse pass must carry the precision of the
+        # variable, otherwise a double precision `1.` would promote the
+        # gradient of an otherwise single precision model.
+        one = 1. if self._var_single is None else \
+            np.float32(1.) if self._var_single else np.float64(1.)
+        return self._jac.adjoint_times(Field.scalar(one))
 
     @property
     def want_metric(self):
@@ -166,6 +183,11 @@ class Linearization(Operator):
     @property
     def device_id(self):
         return self._val.device_id
+
+    @property
+    def dtype(self):
+        """the data type of the value"""
+        return self._val.dtype
 
     def _myadd(self, other, neg):
         from .operators.operator import is_fieldlike
@@ -323,7 +345,8 @@ class Linearization(Operator):
         return self.new(self._val, self._jac, metric)
 
     def with_want_metric(self):
-        return Linearization(self._val, self._jac, self._metric, True)
+        return Linearization(self._val, self._jac, self._metric, True,
+                             self._var_single)
 
     @staticmethod
     def make_var(field, want_metric=False):
@@ -344,7 +367,8 @@ class Linearization(Operator):
         """
         from .operators.scaling_operator import ScalingOperator
         return Linearization(field, ScalingOperator(field.domain, 1.),
-                             want_metric=want_metric)
+                             want_metric=want_metric,
+                             var_single=precision_is_single(field.dtype))
 
     @staticmethod
     def make_const(field, want_metric=False):

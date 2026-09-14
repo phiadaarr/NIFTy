@@ -28,6 +28,7 @@ __all__ = ["get_slice_list", "safe_cast", "parse_spaces", "infer_space",
            "memo", "NiftyMeta", "my_sum", "my_lincomb_simple",
            "my_lincomb", "indent", "my_product", "frozendict",
            "special_add_at", "iscomplextype", "issingleprec",
+           "precision_is_single", "match_precision", "warn_on_mixed_precision",
            "value_reshaper", "lognormal_moments", "check_object_identity",
            "check_MPI_equality", "check_MPI_synced_random_state"]
 
@@ -273,6 +274,113 @@ def _getunique(f, iterable):
     if len(set(lst)) == 1:
         return lst[0]
     raise RuntimeError("Value is not unique", lst)
+
+
+_single_of = {np.dtype(np.float64): np.dtype(np.float32),
+              np.dtype(np.complex128): np.dtype(np.complex64)}
+_double_of = {vv: kk for kk, vv in _single_of.items()}
+
+
+def precision_is_single(dtype):
+    """Classify a data type as single or double precision.
+
+    Parameters
+    ----------
+    dtype : numpy.dtype, dict or None
+        Data type to be classified. A dict (as returned by
+        :attr:`nifty.cl.multi_field.MultiField.dtype`) is classified only if
+        all its floating point entries agree.
+
+    Returns
+    -------
+    bool or None
+        `True` for single precision, `False` for double precision and `None` if
+        the precision is undetermined, i.e. for non-floating point data types,
+        for empty input and for dicts mixing both precisions.
+    """
+    if dtype is None:
+        return None
+    if isinstance(dtype, dict):
+        lst = set(precision_is_single(vv) for vv in dtype.values())
+        lst.discard(None)
+        return lst.pop() if len(lst) == 1 else None
+    dtype = np.dtype(dtype)
+    if dtype in _single_of:
+        return False
+    if dtype in _double_of:
+        return True
+    return None
+
+
+def warn_on_mixed_precision(x):
+    """Warn if a MultiField mixes single and double precision entries.
+
+    Mixing precisions is virtually never intended: NumPy's promotion rules make
+    the double precision entries dominate, so the single precision ones buy
+    neither speed nor memory while quietly costing accuracy.
+
+    Parameters
+    ----------
+    x : MultiField
+        Value whose entries shall be checked. Anything without a `values`
+        method is ignored.
+    """
+    values = getattr(x, "values", None)
+    if values is None:
+        return
+    seen = set()
+    for vv in values():
+        prec = precision_is_single(vv.dtype)
+        if prec is None:
+            continue
+        seen.add(prec)
+        if len(seen) > 1:
+            from warnings import warn
+            warn("Input mixes single and double precision entries; NumPy's "
+                 "promotion rules will upcast the result to double precision. "
+                 "Dtypes: "
+                 + repr({kk: str(vv.dtype) for kk, vv in x.items()}),
+                 UserWarning, stacklevel=3)
+            return
+
+
+def match_precision(x, dtype):
+    """Adapt the floating point precision of a constant to that of a data type.
+
+    Constants stored inside operators are usually created at NumPy's default
+    precision. When such an operator is applied to a single precision field,
+    NumPy's promotion rules would silently upcast the result back to double
+    precision. This helper casts a constant to the precision of the field it is
+    about to be combined with. The kind of the constant is left untouched, i.e.
+    real constants stay real, complex constants stay complex and non-floating
+    point constants are returned unchanged.
+
+    Parameters
+    ----------
+    x : AnyArray, Field or MultiField
+        Constant to be adapted.
+    dtype : numpy.dtype or dict
+        Data type whose precision shall be matched.
+
+    Returns
+    -------
+    The adapted constant, or `x` itself if no cast is necessary. Callers may
+    rely on the identity of the return value to detect that nothing changed.
+    """
+    single = precision_is_single(dtype)
+    if single is None:
+        return x
+    table = _single_of if single else _double_of
+    if isinstance(x.dtype, dict):
+        tgt = {kk: table.get(np.dtype(vv), np.dtype(vv))
+               for kk, vv in x.dtype.items()}
+        if all(np.dtype(x.dtype[kk]) == vv for kk, vv in tgt.items()):
+            return x
+        return x.astype(tgt)
+    tgt = table.get(np.dtype(x.dtype))
+    if tgt is None:
+        return x
+    return x.astype(tgt)
 
 
 def indent(inp):

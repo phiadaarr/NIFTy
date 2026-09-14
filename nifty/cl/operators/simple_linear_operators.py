@@ -25,7 +25,8 @@ from ..domains.unstructured_domain import UnstructuredDomain
 from ..field import Field
 from ..multi_domain import MultiDomain
 from ..multi_field import MultiField
-from ..utilities import check_object_identity
+from ..utilities import (check_object_identity, match_precision,
+                         precision_is_single)
 from .endomorphic_operator import EndomorphicOperator
 from .linear_operator import LinearOperator
 
@@ -39,7 +40,8 @@ class VdotOperator(LinearOperator):
         The field used to build the scalar product with the operator input
     """
     def __init__(self, field):
-        self._field = field
+        self._field = self._field_master = field
+        self._field_single = None
         self._domain = field.domain
         self._target = DomainTuple.scalar_domain()
         self._capability = self.TIMES | self.ADJOINT_TIMES
@@ -47,12 +49,23 @@ class VdotOperator(LinearOperator):
     def _device_preparation(self, x):
         self._field = self._field.at(x.device_id)
 
+    def _precision_preparation(self, x):
+        single = precision_is_single(x.dtype)
+        if single is self._field_single:
+            return
+        self._field_single = single
+        self._field = match_precision(self._field_master, x.dtype)
+
     def apply(self, x, mode):
         self._check_mode(mode)
+        self._precision_preparation(x)
         if mode == self.TIMES:
             # device_preparation only here since scalars are always on host
             self._device_preparation(x)
-            return self._field.vdot(x)
+            # The dot product is deliberately accumulated in double precision
+            # (see `_scipy_vdot` in `ducc_dispatch`). Its result must not drag a
+            # single precision model back up to double precision, though.
+            return match_precision(self._field.vdot(x), x.dtype)
         return self._field*x.asnumpy()[()]
 
 

@@ -113,3 +113,66 @@ def test_actual_gradients2(f, dtype):
         f = (f,)
     ift.extra.check_operator(ift.ScalingOperator(dom, 1.).ptw(*f), fld, ntries=5,
                              only_r_differentiable=only_r_differentiable)
+
+
+def _single_precision(pos):
+    return ift.MultiField.from_dict(
+        {kk: ift.Field(vv.domain, vv.val.astype(np.float32))
+         for kk, vv in pos.items()})
+
+
+def _single_precision_model():
+    dom = ift.RGSpace((8, 8))
+    cfm = ift.CorrelatedFieldMaker("s_")
+    cfm.add_fluctuations(dom, fluctuations=(2.0, 1.0), loglogavgslope=(-3.0, 0.5),
+                         flexibility=None, asperity=None)
+    cfm.set_amplitude_total_offset(offset_mean=0.0, offset_std=(0.5, 0.5))
+    sky = cfm.finalize().exp()
+    pos = _single_precision(ift.from_random(sky.domain))
+    data = ift.Field(sky.target, sky(pos).val.astype(np.float32))
+    lh = ift.GaussianEnergy(data, sampling_dtype=np.float32) @ sky
+    return lh, pos
+
+
+def test_gradient_precision_follows_variable():
+    """The reverse pass must be seeded at the precision of the variable, not at
+    the precision of the (deliberately double precision) energy value."""
+    lh, pos = _single_precision_model()
+
+    lin = lh(ift.Linearization.make_var(pos))
+    for kk, vv in lin.gradient.items():
+        assert vv.dtype == np.float32, f"{kk} is {vv.dtype}"
+
+    ham = ift.StandardHamiltonian(lh, prior_sampling_dtype=np.float32)
+    lin = ham(ift.Linearization.make_var(pos, True))
+    for kk, vv in lin.gradient.items():
+        assert vv.dtype == np.float32, f"{kk} is {vv.dtype}"
+    for kk, vv in lin.metric(pos).items():
+        assert vv.dtype == np.float32, f"{kk} is {vv.dtype}"
+    for kk, vv in lin.metric.draw_sample().items():
+        assert vv.dtype == np.float32, f"{kk} is {vv.dtype}"
+
+    # Double precision must be unaffected
+    pos64 = ift.from_random(lh.domain)
+    lin = ift.StandardHamiltonian(lh).apply(
+        ift.Linearization.make_var(pos64, True))
+    for kk, vv in lin.gradient.items():
+        assert vv.dtype == np.float64, f"{kk} is {vv.dtype}"
+
+
+def test_scaling_operator_preserves_precision():
+    """`ScalingOperator` must not promote via NumPy scalars in any mode."""
+    dom = ift.RGSpace((8,))
+    x = ift.Field(ift.DomainTuple.make(dom), np.ones(8, dtype=np.float32))
+    op = ift.ScalingOperator(dom, 2.0)
+    assert op(x).dtype == np.float32
+    assert op.adjoint(x).dtype == np.float32
+    assert op.inverse(x).dtype == np.float32
+    assert op.adjoint.inverse(x).dtype == np.float32
+
+    cop = ift.ScalingOperator(dom, 2.0 + 1.0j)
+    xc = ift.Field(ift.DomainTuple.make(dom), np.ones(8, dtype=np.complex64))
+    assert cop(xc).dtype == np.complex64
+    assert cop.adjoint(xc).dtype == np.complex64
+    # conjugation must still actually happen
+    assert_allclose(cop.adjoint(xc).asnumpy(), (2.0 - 1.0j) * np.ones(8))
