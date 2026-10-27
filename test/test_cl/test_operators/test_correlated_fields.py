@@ -115,7 +115,8 @@ def test_init(total_N, offset_std, asperity, flexibility, ind, matern):
 @pmp('asperity', [None, (1, 1)])
 @pmp('flexibility', [None, (1, 1)])
 @pmp('matern', [True, False])
-def test_unit_zero_mode(sspace, asperity, flexibility, matern):
+@pmp('offset_std', [1., 0.7, 3.])
+def test_scalar_zero_mode(sspace, asperity, flexibility, matern, offset_std):
     if flexibility is None and asperity is not None:
         pytest.skip()
     cfg = 1, 1
@@ -124,7 +125,7 @@ def test_unit_zero_mode(sspace, asperity, flexibility, matern):
         cfm.add_fluctuations_matern(sspace, *(3 * [cfg]))
     else:
         cfm.add_fluctuations(sspace, *(4 * [cfg]))
-    cfm.set_amplitude_total_offset(0, 1.)
+    cfm.set_amplitude_total_offset(0, offset_std)
     cf = cfm.finalize(prior_info=0)
 
     r = ift.from_random(cf.domain).to_dict()
@@ -137,7 +138,37 @@ def test_unit_zero_mode(sspace, asperity, flexibility, matern):
     rtol = 1e-7
     if isinstance(sspace, (ift.HPSpace, ift.GLSpace)):
         rtol = 1e-2
-    assert_allclose(cf_r.s_integrate(), sspace.total_volume, rtol=rtol)
+    assert_allclose(cf_r.s_integrate(), offset_std*sspace.total_volume, rtol=rtol)
+
+
+@pmp('total_N', [0, 2])
+@pmp('product', [False, True])
+@pmp('offset_std', [0.7, 3.])
+def test_scalar_vs_lognormal_offset_std(total_N, product, offset_std):
+    # A scalar offset_std has to give the same field as a log-normal
+    # offset_std of vanishing width, at the same excitations
+    ops, amps = [], []
+    for zm in (offset_std, (offset_std, 1e-12*offset_std)):
+        cfm = ift.CorrelatedFieldMaker('', total_N)
+        cfm.add_fluctuations(ift.RGSpace(8), (1., .5), (1., .5), (1., .5), (-3., 1.))
+        if product:
+            cfm.add_fluctuations(ift.RGSpace(4), (2., .5), None, None, (-2., 1.))
+        cfm.set_amplitude_total_offset(0.3, zm)
+        ops.append(cfm.finalize())
+        if not product:
+            amps.append(cfm.amplitude)
+    op_scalar, op_lognormal = ops
+
+    r = ift.from_random(op_scalar.domain)
+    zeromode = {"zeromode": ift.full(op_lognormal.domain["zeromode"], 0.)}
+    r_lognormal = r.unite(ift.MultiField.from_dict(zeromode))
+    assert_allclose(op_scalar(r).asnumpy(), op_lognormal(r_lognormal).asnumpy(),
+                    rtol=1e-10)
+    if not product:
+        amp_scalar, amp_lognormal = amps
+        assert_allclose(amp_scalar(r.extract(amp_scalar.domain)).asnumpy(),
+                        amp_lognormal(r_lognormal.extract(amp_lognormal.domain)).asnumpy(),
+                        rtol=1e-10)
 
 @pmp('sspace', spaces)
 @pmp('asperity', [None, (1, 1)])

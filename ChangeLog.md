@@ -51,6 +51,12 @@ Change categories:
   - `InversionEnabler` runs the conjugate gradient on the device of its input
     now. Before, the starting value of the iteration was always allocated on
     the host, such that the inversion of a GPU field fell back to the CPU.
+  - `CorrelatedFieldMaker` with a scalar `offset_std` other than 0 and 1
+    builds the intended prior now. Before, the non-zero modes were divided by
+    `offset_std` and never multiplied back, such that the offset kept a
+    standard deviation of 1 and all fluctuations were scaled by
+    `1/offset_std`. The same applied to `CorrelatedFieldMaker.amplitude` and
+    `power_spectrum`. Tuples and operators were not affected.
 - Changes
   - Reject zero requested eigenvalues when relevant metric degrees of freedom
     are present instead of failing later while processing an empty eigensystem.

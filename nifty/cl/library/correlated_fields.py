@@ -753,6 +753,11 @@ class CorrelatedFieldMaker:
         corr = reduce(mul, a)
         xi = Variable(hspace, self._prefix + 'xi')
         if np.isscalar(self.azm):
+            # get_normalized_amplitudes divides the non-zero modes by a
+            # non-vanishing scalar azm; restore the scale like the operator
+            # branch below does
+            if self.azm != 0:
+                corr = corr.scale(self.azm)
             op = ht(corr.real * xi)
         else:
             expander = ContractionOperator(hspace, spaces=spaces).adjoint
@@ -868,7 +873,7 @@ class CorrelatedFieldMaker:
         normal_amp = self.get_normalized_amplitudes()[0]
 
         if np.isscalar(self.azm):
-            na = normal_amp
+            na = normal_amp if self.azm == 0 else normal_amp.scale(self.azm)
         else:
             space = len(normal_amp.target) - 1
             na = normal_amp * self.azm.broadcast(space, normal_amp.target[space])
